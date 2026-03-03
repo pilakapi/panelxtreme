@@ -20,70 +20,102 @@ app.get("/", async (req, res) => {
 
     <h3>Importar M3U</h3>
     <form method="POST" action="/admin/import">
-      <input name="m3u_url" placeholder="Pega URL M3U aquí" style="width:400px"/>
+      <input name="m3u_url" placeholder="Pega URL M3U aquí" style="width:400px" required/>
       <button type="submit">Importar</button>
     </form>
 
-    <h3>Crear Usuario</h3>
+    <h3>Crear / Reactivar Usuario</h3>
     <form method="POST" action="/admin/create-user">
-      <input name="username" placeholder="Usuario"/>
-      <input name="password" placeholder="Contraseña"/>
-      <input name="days" placeholder="Días duración"/>
-      <input name="max_connections" placeholder="Conexiones"/>
-      <button type="submit">Crear</button>
+      <input name="username" placeholder="Usuario" required/>
+      <input name="password" placeholder="Contraseña" required/>
+      <input name="days" placeholder="Días duración (vacío = ilimitado)"/>
+      <input name="max_connections" placeholder="Conexiones" value="1"/>
+      <button type="submit">Crear / Reactivar</button>
     </form>
 
-    <p>Xtream API:</p>
-    <p>/player_api.php?username=USER&password=PASS</p>
+    <p><b>URL Xtream para IPTV Smarters:</b></p>
+    <p>${req.protocol}://${req.get("host")}</p>
   `);
 });
 
 /* ========= IMPORTAR M3U ========= */
 
 app.post("/admin/import", async (req, res) => {
-  const { m3u_url } = req.body;
+  try {
+    const { m3u_url } = req.body;
 
-  const response = await axios.get(m3u_url);
-  const lines = response.data.split("\n");
+    const response = await axios.get(m3u_url, { timeout: 20000 });
+    const lines = response.data.split("\n");
 
-  await pool.query("DELETE FROM channels");
+    await pool.query("DELETE FROM channels");
 
-  let name = "";
-  let category = "";
+    let name = "";
+    let category = "";
+    let count = 0;
 
-  for (let line of lines) {
-    if (line.startsWith("#EXTINF")) {
-      name = line.split(",")[1];
-      const groupMatch = line.match(/group-title="(.*?)"/);
-      category = groupMatch ? groupMatch[1] : "General";
-    } else if (line.startsWith("http")) {
-      await pool.query(
-        "INSERT INTO channels(name,stream_url,category) VALUES($1,$2,$3)",
-        [name, line.trim(), category]
-      );
+    for (let line of lines) {
+      if (line.startsWith("#EXTINF")) {
+        name = line.split(",")[1] || "Sin nombre";
+        const groupMatch = line.match(/group-title="(.*?)"/);
+        category = groupMatch ? groupMatch[1] : "General";
+      } 
+      else if (line.startsWith("http")) {
+        await pool.query(
+          "INSERT INTO channels(name,stream_url,category) VALUES($1,$2,$3)",
+          [name, line.trim(), category]
+        );
+        count++;
+      }
     }
-  }
 
-  res.send("M3U Importada Correctamente <br><a href='/'>Volver</a>");
+    res.send(`Importados ${count} canales correctamente <br><a href="/">Volver</a>`);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send("Error al importar M3U: " + error.message);
+  }
 });
 
-/* ========= CREAR USUARIO ========= */
+/* ========= CREAR O REACTIVAR USUARIO ========= */
 
 app.post("/admin/create-user", async (req, res) => {
-  const { username, password, days, max_connections } = req.body;
+  try {
+    const { username, password, days, max_connections } = req.body;
 
-  const hash = await bcrypt.hash(password, 10);
-  const exp = Math.floor(Date.now() / 1000) + (days * 86400);
+    const hash = await bcrypt.hash(password, 10);
 
-  await pool.query(
-    "INSERT INTO users(username,password,exp_date,max_connections) VALUES($1,$2,$3,$4)",
-    [username, hash, exp, max_connections]
-  );
+    let exp = null;
+    if (days && days.trim() !== "") {
+      exp = Math.floor(Date.now() / 1000) + (parseInt(days) * 86400);
+    }
 
-  res.send("Usuario creado <br><a href='/'>Volver</a>");
+    const existing = await pool.query(
+      "SELECT * FROM users WHERE username=$1",
+      [username]
+    );
+
+    if (existing.rows.length > 0) {
+      // UPDATE si ya existe
+      await pool.query(
+        "UPDATE users SET password=$1, exp_date=$2, max_connections=$3 WHERE username=$4",
+        [hash, exp, max_connections || 1, username]
+      );
+      res.send("Usuario reactivado / actualizado <br><a href='/'>Volver</a>");
+    } else {
+      // INSERT si no existe
+      await pool.query(
+        "INSERT INTO users(username,password,exp_date,max_connections) VALUES($1,$2,$3,$4)",
+        [username, hash, exp, max_connections || 1]
+      );
+      res.send("Usuario creado <br><a href='/'>Volver</a>");
+    }
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).send("Error al crear usuario");
+  }
 });
 
-/* ========= XTREAM ========= */
+/* ========= VALIDAR USUARIO ========= */
 
 async function validateUser(username, password) {
   const result = await pool.query(
@@ -97,8 +129,15 @@ async function validateUser(username, password) {
   const match = await bcrypt.compare(password, user.password);
   if (!match) return null;
 
+  // Verificar expiración
+  if (user.exp_date && user.exp_date < Math.floor(Date.now() / 1000)) {
+    return null;
+  }
+
   return user;
 }
+
+/* ========= XTREAM API ========= */
 
 app.get("/player_api.php", async (req, res) => {
   const { username, password } = req.query;
@@ -114,6 +153,8 @@ app.get("/player_api.php", async (req, res) => {
     }
   });
 });
+
+/* ========= M3U PARA IPTV ========= */
 
 app.get("/get.php", async (req, res) => {
   const { username, password, type } = req.query;
@@ -134,4 +175,9 @@ app.get("/get.php", async (req, res) => {
   }
 });
 
-app.listen(process.env.PORT);
+/* ========= SERVER ========= */
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log("Servidor corriendo en puerto " + PORT);
+});
