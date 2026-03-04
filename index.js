@@ -33,7 +33,7 @@ app.get("/", async (req, res) => {
       <button type="submit">Crear / Reactivar</button>
     </form>
 
-    <p><b>URL Xtream para IPTV Smarters:</b></p>
+    <p><b>URL Xtream:</b></p>
     <p>${req.protocol}://${req.get("host")}</p>
   `);
 });
@@ -58,8 +58,7 @@ app.post("/admin/import", async (req, res) => {
         name = line.split(",")[1] || "Sin nombre";
         const groupMatch = line.match(/group-title="(.*?)"/);
         category = groupMatch ? groupMatch[1] : "General";
-      } 
-      else if (line.startsWith("http")) {
+      } else if (line.startsWith("http")) {
         await pool.query(
           "INSERT INTO channels(name,stream_url,category) VALUES($1,$2,$3)",
           [name, line.trim(), category]
@@ -75,7 +74,7 @@ app.post("/admin/import", async (req, res) => {
   }
 });
 
-/* ========= CREAR O REACTIVAR USUARIO ========= */
+/* ========= CREAR / REACTIVAR USUARIO ========= */
 
 app.post("/admin/create-user", async (req, res) => {
   try {
@@ -94,14 +93,12 @@ app.post("/admin/create-user", async (req, res) => {
     );
 
     if (existing.rows.length > 0) {
-      // UPDATE si ya existe
       await pool.query(
         "UPDATE users SET password=$1, exp_date=$2, max_connections=$3 WHERE username=$4",
         [hash, exp, max_connections || 1, username]
       );
       res.send("Usuario reactivado / actualizado <br><a href='/'>Volver</a>");
     } else {
-      // INSERT si no existe
       await pool.query(
         "INSERT INTO users(username,password,exp_date,max_connections) VALUES($1,$2,$3,$4)",
         [username, hash, exp, max_connections || 1]
@@ -129,7 +126,6 @@ async function validateUser(username, password) {
   const match = await bcrypt.compare(password, user.password);
   if (!match) return null;
 
-  // Verificar expiración
   if (user.exp_date && user.exp_date < Math.floor(Date.now() / 1000)) {
     return null;
   }
@@ -137,15 +133,45 @@ async function validateUser(username, password) {
   return user;
 }
 
-/* ========= XTREAM API ========= */
+/* ========= XTREAM COMPLETO ========= */
 
 app.get("/player_api.php", async (req, res) => {
-  const { username, password } = req.query;
+  const { username, password, action } = req.query;
   const user = await validateUser(username, password);
 
   if (!user) return res.json({ user_info: { auth: 0 } });
 
-  res.json({
+  if (action === "get_live_categories") {
+    const categories = await pool.query(
+      "SELECT DISTINCT category FROM channels"
+    );
+
+    return res.json(
+      categories.rows.map((cat, index) => ({
+        category_id: index + 1,
+        category_name: cat.category,
+        parent_id: 0
+      }))
+    );
+  }
+
+  if (action === "get_live_streams") {
+    const channels = await pool.query("SELECT * FROM channels");
+
+    return res.json(
+      channels.rows.map((ch) => ({
+        num: ch.id,
+        name: ch.name,
+        stream_type: "live",
+        stream_id: ch.id,
+        stream_icon: "",
+        category_id: 1,
+        stream_url: `${req.protocol}://${req.get("host")}/live/${username}/${password}/${ch.id}.ts`
+      }))
+    );
+  }
+
+  return res.json({
     user_info: {
       auth: 1,
       username: user.username,
@@ -154,25 +180,22 @@ app.get("/player_api.php", async (req, res) => {
   });
 });
 
-/* ========= M3U PARA IPTV ========= */
+/* ========= STREAM REDIRECT ========= */
 
-app.get("/get.php", async (req, res) => {
-  const { username, password, type } = req.query;
+app.get("/live/:username/:password/:id.ts", async (req, res) => {
+  const { username, password, id } = req.params;
+
   const user = await validateUser(username, password);
   if (!user) return res.status(403).send("Denied");
 
-  if (type === "m3u") {
-    const channels = await pool.query("SELECT * FROM channels");
+  const channel = await pool.query(
+    "SELECT * FROM channels WHERE id=$1",
+    [id]
+  );
 
-    let m3u = "#EXTM3U\n";
-    channels.rows.forEach(ch => {
-      m3u += `#EXTINF:-1 group-title="${ch.category}",${ch.name}\n`;
-      m3u += `${ch.stream_url}\n`;
-    });
+  if (channel.rows.length === 0) return res.status(404).send("Not found");
 
-    res.setHeader("Content-Type", "application/x-mpegURL");
-    res.send(m3u);
-  }
+  res.redirect(channel.rows[0].stream_url);
 });
 
 /* ========= SERVER ========= */
