@@ -61,7 +61,7 @@ app.post("/admin/import", async (req, res) => {
       } 
       else if (line.startsWith("http")) {
         await pool.query(
-          "INSERT INTO channels(name,stream_url,category) VALUES($1,$2,$3)",
+          "INSERT INTO channels(name,url,category) VALUES($1,$2,$3)",
           [name, line.trim(), category]
         );
         count++;
@@ -167,7 +167,7 @@ app.get("/get.php", async (req, res) => {
     let m3u = "#EXTM3U\n";
     channels.rows.forEach(ch => {
       m3u += `#EXTINF:-1 group-title="${ch.category}",${ch.name}\n`;
-      m3u += `${ch.stream_url}\n`;
+      m3u += `${ch.url}\n`;
     });
 
     res.setHeader("Content-Type", "application/x-mpegURL");
